@@ -1235,6 +1235,12 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     total_completion_tokens = 0
     total_prompt_tokens = 0
 
+    # Build logprobs kwargs for completion (int format: logprobs=N)
+    gen_kwargs = {}
+    if request.logprobs is not None and request.logprobs > 0:
+        gen_kwargs["logprobs"] = True
+        gen_kwargs["top_logprobs"] = request.logprobs
+
     for i, prompt in enumerate(prompts):
         output = await _wait_with_disconnect(
             engine.generate(
@@ -1243,6 +1249,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 temperature=_resolve_temperature(request.temperature),
                 top_p=_resolve_top_p(request.top_p),
                 stop=request.stop,
+                **gen_kwargs,
             ),
             raw_request,
             timeout=timeout,
@@ -1250,11 +1257,38 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         if output is None:
             return Response(status_code=499)  # Client closed request
 
+        # Build logprobs for this choice
+        choice_logprobs = None
+        if request.logprobs is not None and request.logprobs > 0 and output.token_logprobs:
+            from .logprobs_utils import format_logprobs_for_api
+            from .api.models import ChoiceLogprobs, TokenLogprobInfo, TopLogprob
+
+            api_lp = format_logprobs_for_api(output.token_logprobs)
+            choice_logprobs = ChoiceLogprobs(
+                content=[
+                    TokenLogprobInfo(
+                        token=t["token"],
+                        logprob=t["logprob"],
+                        bytes=t.get("bytes"),
+                        top_logprobs=[
+                            TopLogprob(
+                                token=tp["token"],
+                                logprob=tp["logprob"],
+                                bytes=tp.get("bytes"),
+                            )
+                            for tp in t.get("top_logprobs", [])
+                        ],
+                    )
+                    for t in api_lp.get("content", [])
+                ]
+            )
+
         choices.append(
             CompletionChoice(
                 index=i,
                 text=output.text,
                 finish_reason=output.finish_reason,
+                logprobs=choice_logprobs,
             )
         )
         total_completion_tokens += output.completion_tokens
@@ -1421,6 +1455,11 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     if request.specprefill_keep_pct is not None:
         chat_kwargs["specprefill_keep_pct"] = request.specprefill_keep_pct
 
+    # Logprobs
+    if request.logprobs:
+        chat_kwargs["logprobs"] = True
+        chat_kwargs["top_logprobs"] = request.top_logprobs or 0
+
     # Add tools if provided
     if request.tools:
         chat_kwargs["tools"] = convert_tools_for_template(request.tools)
@@ -1476,6 +1515,32 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     # Determine finish reason
     finish_reason = "tool_calls" if tool_calls else output.finish_reason
 
+    # Build logprobs if requested
+    choice_logprobs = None
+    if request.logprobs and output.token_logprobs:
+        from .logprobs_utils import format_logprobs_for_api
+        from .api.models import ChoiceLogprobs, TokenLogprobInfo, TopLogprob
+
+        api_lp = format_logprobs_for_api(output.token_logprobs)
+        choice_logprobs = ChoiceLogprobs(
+            content=[
+                TokenLogprobInfo(
+                    token=t["token"],
+                    logprob=t["logprob"],
+                    bytes=t.get("bytes"),
+                    top_logprobs=[
+                        TopLogprob(
+                            token=tp["token"],
+                            logprob=tp["logprob"],
+                            bytes=tp.get("bytes"),
+                        )
+                        for tp in t.get("top_logprobs", [])
+                    ],
+                )
+                for t in api_lp.get("content", [])
+            ]
+        )
+
     return ChatCompletionResponse(
         model=_model_name,
         choices=[
@@ -1486,6 +1551,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
                     tool_calls=tool_calls,
                 ),
                 finish_reason=finish_reason,
+                logprobs=choice_logprobs,
             )
         ],
         usage=Usage(
@@ -1884,25 +1950,41 @@ async def stream_completion(
     request: CompletionRequest,
 ) -> AsyncIterator[str]:
     """Stream completion response."""
+    # Build logprobs kwargs
+    gen_kwargs = {}
+    if request.logprobs is not None and request.logprobs > 0:
+        gen_kwargs["logprobs"] = True
+        gen_kwargs["top_logprobs"] = request.logprobs
+
     async for output in engine.stream_generate(
         prompt=prompt,
         max_tokens=request.max_tokens or _default_max_tokens,
         temperature=_resolve_temperature(request.temperature),
         top_p=_resolve_top_p(request.top_p),
         stop=request.stop,
+        **gen_kwargs,
     ):
+        # Build logprobs for this chunk
+        chunk_logprobs_data = None
+        if request.logprobs is not None and request.logprobs > 0 and output.token_logprobs:
+            from .logprobs_utils import format_logprobs_for_api
+
+            chunk_logprobs_data = format_logprobs_for_api(output.token_logprobs)
+
+        choice_data = {
+            "index": 0,
+            "text": output.new_text,
+            "finish_reason": output.finish_reason if output.finished else None,
+        }
+        if chunk_logprobs_data is not None:
+            choice_data["logprobs"] = chunk_logprobs_data
+
         data = {
             "id": f"cmpl-{uuid.uuid4().hex[:8]}",
             "object": "text_completion",
             "created": int(time.time()),
             "model": _model_name,
-            "choices": [
-                {
-                    "index": 0,
-                    "text": output.new_text,
-                    "finish_reason": output.finish_reason if output.finished else None,
-                }
-            ],
+            "choices": [choice_data],
         }
         if output.finished:
             data["usage"] = get_usage(output).model_dump()
@@ -1988,6 +2070,32 @@ async def stream_chat_completion(
         if hasattr(output, "completion_tokens") and output.completion_tokens:
             completion_tokens = output.completion_tokens
 
+        # Build chunk logprobs if requested
+        chunk_logprobs = None
+        if request.logprobs and output.token_logprobs:
+            from .logprobs_utils import format_logprobs_for_api
+            from .api.models import ChoiceLogprobs, TokenLogprobInfo, TopLogprob
+
+            api_lp = format_logprobs_for_api(output.token_logprobs)
+            chunk_logprobs = ChoiceLogprobs(
+                content=[
+                    TokenLogprobInfo(
+                        token=t["token"],
+                        logprob=t["logprob"],
+                        bytes=t.get("bytes"),
+                        top_logprobs=[
+                            TopLogprob(
+                                token=tp["token"],
+                                logprob=tp["logprob"],
+                                bytes=tp.get("bytes"),
+                            )
+                            for tp in t.get("top_logprobs", [])
+                        ],
+                    )
+                    for t in api_lp.get("content", [])
+                ]
+            )
+
         # Use reasoning parser if enabled
         if _reasoning_parser and delta_text:
             previous_text = accumulated_text
@@ -2010,6 +2118,7 @@ async def stream_chat_completion(
                             reasoning=delta_msg.reasoning,
                         ),
                         finish_reason=output.finish_reason if output.finished else None,
+                        logprobs=chunk_logprobs,
                     )
                 ],
                 usage=get_usage(output) if output.finished else None,
@@ -2063,6 +2172,7 @@ async def stream_chat_completion(
                                     finish_reason=(
                                         "tool_calls" if output.finished else None
                                     ),
+                                    logprobs=chunk_logprobs,
                                 )
                             ],
                             usage=get_usage(output) if output.finished else None,
@@ -2086,6 +2196,7 @@ async def stream_chat_completion(
                             if (output.finished and tool_calls_detected)
                             else (output.finish_reason if output.finished else None)
                         ),
+                        logprobs=chunk_logprobs,
                     )
                 ],
                 usage=get_usage(output) if output.finished else None,

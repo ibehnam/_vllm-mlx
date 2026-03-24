@@ -141,6 +141,34 @@ class ResponseFormat(BaseModel):
 
 
 # =============================================================================
+# Logprobs (OpenAI-compatible)
+# =============================================================================
+
+
+class TopLogprob(BaseModel):
+    """Log probability info for a single candidate token."""
+
+    token: str
+    logprob: float
+    bytes: list[int] | None = None
+
+
+class TokenLogprobInfo(BaseModel):
+    """Log probability info for a generated token position."""
+
+    token: str
+    logprob: float
+    bytes: list[int] | None = None
+    top_logprobs: list[TopLogprob] = Field(default_factory=list)
+
+
+class ChoiceLogprobs(BaseModel):
+    """Log probabilities for a choice. Matches OpenAI API spec."""
+
+    content: list[TokenLogprobInfo] | None = None
+
+
+# =============================================================================
 # Chat Completion
 # =============================================================================
 
@@ -164,6 +192,9 @@ class ChatCompletionRequest(BaseModel):
         None  # Streaming options (include_usage, etc.)
     )
     stop: list[str] | None = None
+    # Logprobs
+    logprobs: bool | None = None
+    top_logprobs: int | None = None  # 0-20
     # Tool calling
     tools: list[ToolDefinition] | None = None
     tool_choice: str | dict | None = None  # "auto", "none", or specific tool
@@ -203,6 +234,7 @@ class ChatCompletionChoice(BaseModel):
     index: int = 0
     message: AssistantMessage
     finish_reason: str | None = "stop"
+    logprobs: ChoiceLogprobs | None = None
 
 
 class Usage(BaseModel):
@@ -239,6 +271,8 @@ class CompletionRequest(BaseModel):
     max_tokens: int | None = None
     stream: bool = False
     stop: list[str] | None = None
+    # Logprobs (OpenAI legacy format: int = number of top logprobs)
+    logprobs: int | None = None
     # Request timeout in seconds (None = use server default)
     timeout: float | None = None
 
@@ -249,6 +283,7 @@ class CompletionChoice(BaseModel):
     index: int = 0
     text: str
     finish_reason: str | None = "stop"
+    logprobs: ChoiceLogprobs | None = None
 
 
 class CompletionResponse(BaseModel):
@@ -442,6 +477,7 @@ class ChatCompletionChunkChoice(BaseModel):
     index: int = 0
     delta: ChatCompletionChunkDelta
     finish_reason: str | None = None
+    logprobs: ChoiceLogprobs | None = None
 
 
 class ChatCompletionChunk(BaseModel):

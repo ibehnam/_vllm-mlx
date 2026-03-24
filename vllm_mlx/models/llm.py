@@ -30,6 +30,7 @@ class StreamingOutput:
     token: int
     finished: bool = False
     finish_reason: str | None = None
+    logprobs: object = None  # mx.array of shape [vocab_size] when available
 
 
 class MLXLanguageModel:
@@ -184,6 +185,8 @@ class MLXLanguageModel:
         """
         Stream text generation token by token.
 
+        Uses mlx_lm.utils.generate_step directly to access per-token logprobs.
+
         Args:
             prompt: Input prompt text
             max_tokens: Maximum number of tokens to generate
@@ -193,35 +196,55 @@ class MLXLanguageModel:
             stop: List of stop sequences
 
         Yields:
-            StreamingOutput for each generated token
+            StreamingOutput for each generated token (with logprobs)
         """
         if not self._loaded:
             self.load()
 
-        from mlx_lm import stream_generate
+        import mlx.core as mx
+        from mlx_lm.tokenizer_utils import TokenizerWrapper
+        from mlx_lm.generate import generate_step
 
-        # Create sampler with parameters
+        if not isinstance(self.tokenizer, TokenizerWrapper):
+            tokenizer_wrapper = TokenizerWrapper(self.tokenizer)
+        else:
+            tokenizer_wrapper = self.tokenizer
+
+        prompt_tokens = mx.array(tokenizer_wrapper.encode(prompt))
+        detokenizer = tokenizer_wrapper.detokenizer
+        detokenizer.reset()
+
         sampler = self._create_sampler(temperature, top_p)
 
         token_count = 0
         accumulated_text = ""
 
-        mtp_kwargs = {}
-        if self._mtp:
-            mtp_kwargs["mtp"] = True
-
-        for response in stream_generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            **mtp_kwargs,
+        for (token_id, token_logprobs), _ in zip(
+            generate_step(
+                prompt_tokens,
+                self.model,
+                sampler=sampler,
+            ),
+            range(max_tokens),
         ):
-            token_count += 1
-            # response.text is the new token text (not accumulated)
-            new_text = response.text
+            if token_id == tokenizer_wrapper.eos_token_id:
+                detokenizer.finalize()
+                new_text = detokenizer.last_segment
+                if new_text:
+                    accumulated_text += new_text
+                yield StreamingOutput(
+                    text=new_text,
+                    token=token_id,
+                    finished=True,
+                    finish_reason="stop",
+                    logprobs=token_logprobs,
+                )
+                return
+
+            detokenizer.add_token(token_id)
+            new_text = detokenizer.last_segment
             accumulated_text += new_text
+            token_count += 1
 
             # Check for stop sequences
             should_stop = False
@@ -238,13 +261,26 @@ class MLXLanguageModel:
 
             yield StreamingOutput(
                 text=new_text,
-                token=response.token if hasattr(response, "token") else 0,
+                token=token_id,
                 finished=finished,
                 finish_reason=finish_reason,
+                logprobs=token_logprobs,
             )
 
             if finished:
-                break
+                return
+
+        # Finalize if we ran out of tokens
+        detokenizer.finalize()
+        new_text = detokenizer.last_segment
+        if new_text:
+            yield StreamingOutput(
+                text=new_text,
+                token=0,
+                finished=True,
+                finish_reason="length",
+                logprobs=None,
+            )
 
     def chat(
         self,

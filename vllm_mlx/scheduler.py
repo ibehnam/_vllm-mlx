@@ -1854,6 +1854,23 @@ class Scheduler:
             else:
                 new_text = self._decode_tokens([response.token])
 
+            # Extract logprobs if requested
+            token_lp = None
+            if (
+                request.sampling_params.logprobs
+                and request.sampling_params.top_logprobs > 0
+                and hasattr(response, "logprobs")
+                and response.logprobs is not None
+            ):
+                from .logprobs_utils import extract_top_logprobs
+
+                token_lp = extract_top_logprobs(
+                    response.logprobs,
+                    response.token,
+                    request.sampling_params.top_logprobs,
+                    self.tokenizer,
+                )
+
             # Create output
             output = RequestOutput(
                 request_id=request_id,
@@ -1862,6 +1879,7 @@ class Scheduler:
                 output_token_ids=list(request.output_token_ids),
                 prompt_tokens=request.num_prompt_tokens,
                 completion_tokens=request.num_output_tokens,
+                token_logprobs=[token_lp] if token_lp else None,
             )
 
             # Check if finished

@@ -60,6 +60,8 @@ class SamplingParams:
     repetition_penalty: float = 1.0
     stop: Optional[List[str]] = None
     stop_token_ids: Optional[List[int]] = None
+    logprobs: bool = False
+    top_logprobs: int = 0
 
     def __post_init__(self):
         if self.stop is None:
@@ -208,6 +210,8 @@ class RequestOutput:
     # Timing
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Logprobs (list of dicts from extract_top_logprobs, one per token)
+    token_logprobs: Optional[List[dict]] = None
 
     @property
     def usage(self) -> Dict[str, int]:

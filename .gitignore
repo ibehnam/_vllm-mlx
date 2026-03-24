@@ -95,3 +95,10 @@ temp/
 
 # MLX cache
 .mlx_cache/
+.Spotlight-V100
+.Trashes
+.fseventsd
+.Icon?
+.claude
+.codex
+.opencode

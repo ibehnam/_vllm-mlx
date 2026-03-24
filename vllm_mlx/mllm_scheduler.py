@@ -293,6 +293,8 @@ class MLLMScheduler:
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            logprobs=kwargs.pop("logprobs", False),
+            top_logprobs=kwargs.pop("top_logprobs", 0),
         )
 
         request = MLLMRequest(
@@ -454,6 +456,23 @@ class MLLMScheduler:
             # Decode the new token
             new_text = tokenizer.decode([response.token])
 
+            # Extract logprobs if requested
+            token_lp = None
+            if (
+                request.sampling_params.logprobs
+                and request.sampling_params.top_logprobs > 0
+                and hasattr(response, "logprobs")
+                and response.logprobs is not None
+            ):
+                from .logprobs_utils import extract_top_logprobs
+
+                token_lp = extract_top_logprobs(
+                    response.logprobs,
+                    response.token,
+                    request.sampling_params.top_logprobs,
+                    tokenizer,
+                )
+
             # Create output
             output = RequestOutput(
                 request_id=request_id,
@@ -462,6 +481,7 @@ class MLLMScheduler:
                 output_token_ids=list(request.output_tokens),
                 prompt_tokens=request.num_prompt_tokens,
                 completion_tokens=request.num_output_tokens,
+                token_logprobs=[token_lp] if token_lp else None,
             )
 
             # Check if finished
@@ -729,12 +749,18 @@ class MLLMScheduler:
             **kwargs,
         )
 
-        # Collect all outputs
+        # Collect all outputs, accumulating logprobs
         final_output = None
+        all_logprobs = []
         async for output in self.stream_outputs(request_id):
             final_output = output
+            if output.token_logprobs:
+                all_logprobs.extend(output.token_logprobs)
             if output.finished:
                 break
+
+        if final_output is not None and all_logprobs:
+            final_output.token_logprobs = all_logprobs
 
         if final_output is None:
             # Create empty output on error

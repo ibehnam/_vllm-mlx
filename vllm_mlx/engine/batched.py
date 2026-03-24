@@ -453,6 +453,9 @@ class BatchedEngine(BaseEngine):
         if not self._loaded:
             await self.start()
 
+        want_logprobs = kwargs.pop("logprobs", False)
+        top_logprobs_k = kwargs.pop("top_logprobs", 0)
+
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests when model is multimodal.
             # MLLM models only initialise the _mllm_scheduler (not _engine),
@@ -464,6 +467,8 @@ class BatchedEngine(BaseEngine):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                logprobs=want_logprobs,
+                top_logprobs=top_logprobs_k,
             )
 
             return GenerationOutput(
@@ -471,6 +476,7 @@ class BatchedEngine(BaseEngine):
                 prompt_tokens=output.prompt_tokens,
                 completion_tokens=output.completion_tokens,
                 finish_reason=output.finish_reason,
+                token_logprobs=output.token_logprobs,
             )
 
         # Use LLM engine for text-only (non-MLLM models)
@@ -481,6 +487,8 @@ class BatchedEngine(BaseEngine):
             temperature=temperature,
             top_p=top_p,
             stop=stop or [],
+            logprobs=want_logprobs,
+            top_logprobs=top_logprobs_k,
         )
 
         output = await self._engine.generate(
@@ -495,6 +503,7 @@ class BatchedEngine(BaseEngine):
             prompt_tokens=output.prompt_tokens,
             completion_tokens=output.completion_tokens,
             finish_reason=output.finish_reason,
+            token_logprobs=output.token_logprobs,
         )
 
     async def stream_generate(
@@ -527,6 +536,9 @@ class BatchedEngine(BaseEngine):
         if not self._loaded:
             await self.start()
 
+        want_logprobs = kwargs.pop("logprobs", False)
+        top_logprobs_k = kwargs.pop("top_logprobs", 0)
+
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all streaming when model is multimodal
             request_id = await self._mllm_scheduler.add_request_async(
@@ -536,6 +548,8 @@ class BatchedEngine(BaseEngine):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                logprobs=want_logprobs,
+                top_logprobs=top_logprobs_k,
             )
 
             async for output in self._mllm_scheduler.stream_outputs(request_id):
@@ -546,6 +560,7 @@ class BatchedEngine(BaseEngine):
                     completion_tokens=output.completion_tokens,
                     finished=output.finished,
                     finish_reason=output.finish_reason,
+                    token_logprobs=output.token_logprobs,
                 )
             return
 
@@ -557,6 +572,8 @@ class BatchedEngine(BaseEngine):
             temperature=temperature,
             top_p=top_p,
             stop=stop or [],
+            logprobs=want_logprobs,
+            top_logprobs=top_logprobs_k,
         )
 
         prefix_boundary = kwargs.pop("prefix_boundary", 0)
@@ -576,6 +593,7 @@ class BatchedEngine(BaseEngine):
                 completion_tokens=output.completion_tokens,
                 finished=output.finished,
                 finish_reason=output.finish_reason,
+                token_logprobs=output.token_logprobs,
             )
 
     async def chat(

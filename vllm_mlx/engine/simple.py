@@ -252,6 +252,26 @@ class SimpleEngine(BaseEngine):
         if not self._loaded:
             await self.start()
 
+        # When logprobs requested, use streaming path to collect them
+        if kwargs.get("logprobs"):
+            last_output = None
+            all_logprobs = []
+            async for chunk in self.stream_generate(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+                **kwargs,
+            ):
+                last_output = chunk
+                if chunk.token_logprobs:
+                    all_logprobs.extend(chunk.token_logprobs)
+            if last_output is not None:
+                last_output.token_logprobs = all_logprobs or None
+                return last_output
+            return GenerationOutput(text="", finished=True)
+
         async with self._generation_lock:
             # Run in thread pool to allow asyncio timeout to work
             output = await asyncio.to_thread(
@@ -359,6 +379,10 @@ class SimpleEngine(BaseEngine):
             completion_tokens = 0
             finished = False
 
+            # Extract logprobs params (passed via kwargs from API layer)
+            want_logprobs = kwargs.pop("logprobs", False)
+            top_logprobs_k = kwargs.pop("top_logprobs", 0)
+
             for chunk in self._model.stream_generate(
                 prompt=prompt,
                 max_tokens=max_tokens,
@@ -383,6 +407,21 @@ class SimpleEngine(BaseEngine):
                 if finished:
                     finish_reason = getattr(chunk, "finish_reason", "stop")
 
+                # Extract logprobs if requested and available
+                token_lp_list = None
+                chunk_logprobs = getattr(chunk, "logprobs", None)
+                if want_logprobs and top_logprobs_k > 0 and chunk_logprobs is not None:
+                    from ..logprobs_utils import extract_top_logprobs
+
+                    token_id = getattr(chunk, "token", 0)
+                    token_lp = extract_top_logprobs(
+                        chunk_logprobs,
+                        token_id,
+                        top_logprobs_k,
+                        self._model.tokenizer,
+                    )
+                    token_lp_list = [token_lp]
+
                 yield GenerationOutput(
                     text=accumulated_text,
                     new_text=new_text,
@@ -390,6 +429,7 @@ class SimpleEngine(BaseEngine):
                     completion_tokens=completion_tokens,
                     finished=finished,
                     finish_reason=finish_reason,
+                    token_logprobs=token_lp_list,
                 )
 
                 if finished:
@@ -436,6 +476,28 @@ class SimpleEngine(BaseEngine):
         """
         if not self._loaded:
             await self.start()
+
+        # When logprobs requested, use streaming path to collect them
+        if kwargs.get("logprobs"):
+            last_output = None
+            all_logprobs = []
+            async for chunk in self.stream_chat(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                tools=tools,
+                images=images,
+                videos=videos,
+                **kwargs,
+            ):
+                last_output = chunk
+                if chunk.token_logprobs:
+                    all_logprobs.extend(chunk.token_logprobs)
+            if last_output is not None:
+                last_output.token_logprobs = all_logprobs or None
+                return last_output
+            return GenerationOutput(text="", finished=True)
 
         # Convert tools for template if provided
         template_tools = convert_tools_for_template(tools) if tools else None
